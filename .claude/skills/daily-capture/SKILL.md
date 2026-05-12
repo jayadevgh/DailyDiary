@@ -1,6 +1,6 @@
 ---
 name: daily-capture
-description: Captures and organizes your daily activity into DateBased logs and SubjectBased topic files. Run with /daily-capture. Pulls from Google Calendar, Gmail sent, and Claude chat history, then routes extracted content into the right folders. Also accepts optional voice transcript or free-form text input.
+description: Captures and organizes your daily activity into DateBased logs and SubjectBased topic files. Run with /daily-capture. Pulls from Google Calendar, Gmail (sent and received), and Claude chat history, then routes extracted content into the right folders. Also accepts optional voice transcript or free-form text input.
 allowed-tools: Bash, Read, Write, mcp__google_calendar, mcp__gmail
 disable-model-invocation: false
 ---
@@ -106,10 +106,15 @@ Use the Google Calendar MCP to first list all available calendars, then pull eve
 
 For each event extract: calendar name, title, start time, end time, duration, attendees.
 
-### 3b. Gmail (sent only)
-Use the Gmail MCP to fetch emails **sent** by the user during the day window.
-For each email extract: subject, recipient(s), rough topic inferred from subject.
+### 3b. Gmail (sent and received)
+Use the Gmail MCP to fetch emails from the day window in two passes:
+
+1. **Sent** — emails sent by the user (`from:jayadevgh@gmail.com in:sent`)
+2. **Received** — emails received that are relevant to the user's leaf folders. Search by folder keywords (e.g. course names, project names, club names) to filter noise. Skip newsletters, notifications, and automated mail.
+
+For each email extract: direction (sent/received), subject, other party, rough topic inferred from subject.
 Do not extract email body content — subject line is enough.
+Route received emails to matching leaf folders the same way as any other content.
 
 ### 3c. Claude chat history
 Use the `conversation_search` tool to find chats from the day window. Run multiple searches with different keywords to get broad coverage — search by topic areas like the user's known subjects, projects, and general terms like "code", "debug", "write", "research". Also run `recent_chats` to catch anything the keyword search might miss.
@@ -168,6 +173,7 @@ Before writing anything, show the user a full preview:
 SOURCES PULLED:
   ✓ Google Calendar: [N] events
   ✓ Gmail sent: [N] emails
+  ✓ Gmail received (relevant): [N] emails
   ✓ Claude chat history: [N] relevant chats
   [✓/–] Manual input: [provided / skipped]
 
@@ -208,8 +214,9 @@ Each entry in the daily log gets a timestamp so you can see what time of day thi
 ## Events
 - HH:MM – HH:MM | [Event title] | [Attendees if any]
 
-## Emails Sent
-- HH:MM | [Subject] → [Recipient(s)]
+## Emails
+- HH:MM | ↑ [Subject] → [Recipient]
+- HH:MM | ↓ [Subject] ← [Sender]
 
 ## Claude Chats
 - HH:MM | [Topic of what was worked on]
