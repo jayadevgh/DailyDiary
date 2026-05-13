@@ -1,6 +1,6 @@
 ---
 name: daily-capture
-description: Captures and organizes daily activity into chronological daily logs and long-running topic/project logs. Run with /daily-capture. Pulls from Google Calendar, Gmail sent mail, and chat history, then routes extracted content into configured workspace folders such as projects, school, research, career, music, and personal. Also accepts optional voice transcript or free-form text input.
+description: Captures and organizes daily activity into chronological daily logs and long-running topic/project logs. Run with /daily-capture. Pulls from Google Calendar, Gmail (sent and received), and chat history, then routes extracted content into configured workspace folders such as projects, school, research, career, music, and personal. Also accepts optional voice transcript or free-form text input.
 allowed-tools: Bash, Read, Write, mcp__google_calendar, mcp__gmail
 disable-model-invocation: false
 ---
@@ -160,10 +160,15 @@ List all calendars first, then pull events from every calendar in the day window
 
 For each event extract: calendar name, title, start time, end time, attendees.
 
-### 3b. Gmail (sent only)
-Fetch emails sent by the user during the day window.
-For each email extract: subject, recipient(s), rough topic.
+### 3b. Gmail (sent and received)
+Fetch emails from the day window in two passes:
+
+1. **Sent** — emails sent by the user (`from:[user-email] in:sent`)
+2. **Received** — emails received that are relevant to the user's routable folders. Search by folder keywords (e.g. course names, project names, club names) to filter noise. Skip newsletters, notifications, and automated mail.
+
+For each email extract: direction (sent/received), subject, other party, rough topic.
 Do not extract body content.
+Route received emails to matching topic folders the same way as any other content.
 
 ### 3c. Claude chat history
 Use `conversation_search` if available. Run multiple searches with topic keywords. Also run `recent_chats`.
@@ -241,6 +246,7 @@ Before writing anything, show:
 SOURCES PULLED:
   ✓ Google Calendar: [N] events
   ✓ Gmail sent: [N] emails
+  ✓ Gmail received (relevant): [N] emails
   ✓/– Claude chat history: [N relevant chats / tool unavailable]
   ✓/– Manual input: [provided / skipped]
 
@@ -276,8 +282,9 @@ Wait for confirmation before writing anything.
 ## Events
 - HH:MM – HH:MM | [Event title] | [Calendar] | [Attendees if any]
 
-## Emails Sent
-- HH:MM | [Subject] → [Recipient(s)]
+## Emails
+- HH:MM | ↑ [Subject] → [Recipient]
+- HH:MM | ↓ [Subject] ← [Sender]
 
 ## Chats / Work Sessions
 - HH:MM | [Topic worked on]
