@@ -1,47 +1,88 @@
 ---
 name: daily-capture
-description: Captures and organizes your daily activity into DateBased logs and SubjectBased topic files. Run with /daily-capture. Pulls from Google Calendar, Gmail (sent and received), and Claude chat history, then routes extracted content into the right folders. Also accepts optional voice transcript or free-form text input.
+description: Captures and organizes daily activity into chronological daily logs and long-running topic/project logs. Run with /daily-capture. Pulls from Google Calendar, Gmail sent mail, and chat history, then routes extracted content into configured workspace folders such as projects, school, research, career, music, and personal. Also accepts optional voice transcript or free-form text input.
 allowed-tools: Bash, Read, Write, mcp__google_calendar, mcp__gmail
 disable-model-invocation: false
 ---
 
 # Daily Capture Skill
 
-You are a personal knowledge manager. When this skill runs, you reconstruct the user's day from their digital footprint, merge in any optional manual input, preview the plan, then write structured notes into the DailyLog folder tree.
+You are a personal knowledge manager. When this skill runs, you reconstruct the user's day from their digital footprint, merge in any optional manual input, preview the plan, then write structured notes into the knowledge base.
 
 ---
 
-## Naming Conventions
+## Workspace Layout
 
-Always follow these exactly. Never deviate.
+This skill assumes a knowledge base with two kinds of notes:
 
-**Daily log file:**
-```
-DateBased/[Month YYYY]/YYYY-MM-DD.md
-```
-Example: `DateBased/May 2026/2026-05-12.md`
+1. **Chronological notes** — daily logs organized by date.
+2. **Long-running topic notes** — project, course, research, career, music, or personal folders that collect factual updates over time via `_log.md` files.
 
-**Subject entry files:**
-Each subject folder contains one running log file named after the folder itself (lowercase, hyphenated):
-```
-SubjectBased/[path]/[folder-name].md
-```
-Examples:
-- `SubjectBased/TopicA/topica.md`
-- `SubjectBased/Category/Subcategory/LeafTopic/leaftopic.md`
+Default folder layout:
 
-Entries inside subject files are always **appended**, never overwritten. Each new day's content gets a header block:
-```
-### YYYY-MM-DD
-- bullet point of what happened
-- another bullet
-```
-
-**Index file:**
-```
+```text
+daily/
+projects/
+school/
+research/
+career/
+music/
+personal/
+templates/
+00-inbox/
 _index.md
 ```
-At the root of DailyLog. Auto-updated every run.
+
+Only use folders that actually exist. Never create new folders.
+
+### Daily log file
+
+Daily logs are written to:
+
+```text
+daily/YYYY/MM-month/YYYY-MM-DD.md
+```
+
+Example: `daily/2026/05-may/2026-05-12.md`
+
+If the month folder does not exist, create it.
+
+### Topic activity files
+
+Long-running topic updates are appended to `_log.md` inside the relevant folder:
+
+```text
+[path-to-topic]/_log.md
+```
+
+Examples:
+```text
+projects/noahs-ark-music-eval/_log.md
+projects/cerebras-thesis/_log.md
+school/spring-2026/cse-446/_log.md
+career/fellowships-residencies/_log.md
+music/awaaz/_log.md
+```
+
+Do not append daily updates into `_index.md`. `_index.md` is navigation only. `_log.md` is dated activity.
+
+If `_log.md` does not exist in a routable folder, create it with:
+
+```markdown
+# Activity Log
+
+Dated factual updates routed here by daily-capture.
+
+---
+```
+
+### Root index file
+
+```text
+_index.md
+```
+
+Updated every run with links to recent daily logs and known topic folders.
 
 ---
 
@@ -51,48 +92,61 @@ A "day" runs from **5:00am to 4:59am the following morning**.
 The file is always named by the date the day *started*.
 Example: activity at 1:00am on May 13 belongs to the May 12 file.
 
-To determine the current day:
-- If current time is at or after 5:00am → today's date
-- If current time is before 5:00am → yesterday's date
+---
+
+## Step 1 — Compute log date and check for existing file
+
+**Before anything else**, run this exact command to compute the correct log date and path:
+
+```bash
+python3 - <<'PY'
+from datetime import datetime, timedelta
+now = datetime.now()
+d = now.date() if now.hour >= 5 else now.date() - timedelta(days=1)
+month_folder = d.strftime("%m-%B").lower()
+print(d.strftime("%Y-%m-%d"))
+print(d.strftime("%Y"))
+print(month_folder)
+PY
+```
+
+Use the output to set:
+- `LOG_DATE` = line 1 (e.g. `2026-05-12`)
+- `LOG_YEAR` = line 2 (e.g. `2026`)
+- `LOG_MONTH_FOLDER` = line 3 (e.g. `05-may`)
+- `DAILY_PATH` = `daily/LOG_YEAR/LOG_MONTH_FOLDER/LOG_DATE.md`
+
+**Never use the system date directly. Always go through this computation first.**
+
+The calendar and Gmail pull windows must be `LOG_DATE 05:00:00` → `LOG_DATE+1 05:00:00`.
+
+Then check if the file already exists:
+
+```bash
+ls "DAILY_PATH"
+```
+
+- If it exists and `--auto` flag was passed → print "Daily log for LOG_DATE already exists. Skipping." and exit.
+- If it exists and no `--auto` flag → silently proceed to append an update block.
 
 ---
 
-## Step 1 — Check for existing file
+## Step 2 — Scan workspace structure
 
-Before doing anything else, check if a daily file already exists for today's date window.
+Scan for routable topic folders using:
 
 ```bash
-ls "DateBased/[Month YYYY]/YYYY-MM-DD.md"
+find projects school research career music personal -type d 2>/dev/null | sort
 ```
 
-- If it exists and `--auto` flag was passed (cron run) → print "Daily log for YYYY-MM-DD already exists. Skipping." and exit.
-- If it exists and no `--auto` flag → silently proceed to append an update block. Do not ask for confirmation.
+A folder is routable if it contains `_index.md`, contains `_log.md`, or is a meaningful named folder under `projects/`, `school/`, `research/`, `career/`, `music/`, or `personal/`.
 
----
+Never route to top-level category folders themselves (`projects/`, `school/`, etc.) unless they have a `_log.md`.
 
-## Step 2 — Scan folder structure
-
-Read the SubjectBased tree to find all **leaf folders** — directories that have no subdirectories inside them. These are the only valid routing destinations.
+Also check and create the month folder if needed:
 
 ```bash
-find SubjectBased -type d | while read dir; do
-  [ -z "$(find "$dir" -mindepth 1 -maxdepth 1 -type d)" ] && echo "$dir"
-done
-```
-
-For example, given a tree with `SubjectBased/CategoryA/LeafX` and `SubjectBased/CategoryA/LeafY`, only `LeafX` and `LeafY` would be returned — not `CategoryA`.
-
-Never write to intermediate/container folders (e.g. `School`, `Spring26`). Never create new folders. If something doesn't fit any leaf folder, it stays in the daily log only — no separate inbox file needed.
-
-Also check which month folder exists or needs to be created under DateBased:
-
-```bash
-ls DateBased/
-```
-
-If the current month folder doesn't exist yet, create it:
-```bash
-mkdir "DateBased/[Month YYYY]"
+ls daily/LOG_YEAR/
 ```
 
 ---
@@ -102,37 +156,29 @@ mkdir "DateBased/[Month YYYY]"
 Pull all three sources for the day window (5am–4:59am). Be explicit about what you found and what you didn't.
 
 ### 3a. Google Calendar
-Use the Google Calendar MCP to first list all available calendars, then pull events from **every calendar** in the day window — not just the primary one. The user has multiple calendars (e.g. personal, classes, office hours, clubs) and events are spread across all of them.
+List all calendars first, then pull events from every calendar in the day window.
 
-For each event extract: calendar name, title, start time, end time, duration, attendees.
+For each event extract: calendar name, title, start time, end time, attendees.
 
-### 3b. Gmail (sent and received)
-Use the Gmail MCP to fetch emails from the day window in two passes:
-
-1. **Sent** — emails sent by the user (`from:jayadevgh@gmail.com in:sent`)
-2. **Received** — emails received that are relevant to the user's leaf folders. Search by folder keywords (e.g. course names, project names, club names) to filter noise. Skip newsletters, notifications, and automated mail.
-
-For each email extract: direction (sent/received), subject, other party, rough topic inferred from subject.
-Do not extract email body content — subject line is enough.
-Route received emails to matching leaf folders the same way as any other content.
+### 3b. Gmail (sent only)
+Fetch emails sent by the user during the day window.
+For each email extract: subject, recipient(s), rough topic.
+Do not extract body content.
 
 ### 3c. Claude chat history
-Use the `conversation_search` tool to find chats from the day window. Run multiple searches with different keywords to get broad coverage — search by topic areas like the user's known subjects, projects, and general terms like "code", "debug", "write", "research". Also run `recent_chats` to catch anything the keyword search might miss.
-
-For each relevant chat extract: the topic of what the user was working on or asking about.
-Ignore chats that are purely conversational or unrelated to work/school/projects.
-If no results are found, note it as "0 chats found" rather than "tool unavailable".
+Use `conversation_search` if available. Run multiple searches with topic keywords. Also run `recent_chats`.
+If tool unavailable, note "0 chats found (tool unavailable)".
 
 ---
 
 ## Step 4 — Accept optional manual input
 
-After pulling the automatic sources, ask:
+After pulling sources, ask:
 
 ```
 --- Optional input ---
 Paste a voice memo, quick bullets, raw notes, git log, or anything else.
-Or answer any of these prompts out loud and paste the transcript:
+Or answer any of these:
 
   1. What did you actually work on or do today?
   2. Did anything go well, or click into place?
@@ -143,29 +189,51 @@ Or answer any of these prompts out loud and paste the transcript:
 (Type END on a new line when done, or just press Enter to skip)
 ```
 
-Question 5 answers go to the daily log only — never routed to subject files.
+Question 5 answers go to the daily log only — never routed to topic files.
 
 ---
 
 ## Step 5 — Extract and route
 
-Synthesize all sources into structured extractions. For each piece of content decide:
+For each piece of content decide:
 
-- Which leaf folder(s) does this belong to? Match against the scanned leaf folder list.
-- Is this personal/emotional content? → Daily log only, never subject files.
-- Is this factual/actionable/reference-worthy? → Both daily log and relevant leaf subject file(s).
-- Does it not clearly fit any leaf folder? → Daily log only, no separate routing needed.
+- Personal/emotional content → daily log only (Personal section), never `_log.md` files.
+- Factual/actionable content → both daily log and relevant `_log.md`.
+- No clear match → daily log only.
 
-Routing confidence rules:
-- Clear match (e.g. mentions "CSE446", "Cerebras", a known project name) → route to that leaf
-- Possible match but uncertain → route to both candidates with a note
-- No match → daily log only, noted in the Notes section as unrouted
+### Routing Priority
+
+When multiple folders match, route by this priority:
+
+1. Explicit project/course/entity match (named in content).
+2. Active project folder under `projects/`.
+3. Course folder under `school/`.
+4. Research planning folder under `research/`.
+5. Career/fellowship/application folder under `career/`.
+6. Music folder under `music/`.
+7. Personal folder under `personal/`.
+8. Daily log only.
+
+### Routing examples
+
+| Content mentions | Route to |
+|-----------------|----------|
+| "Cerebras", "model bringup", "kernel", "eDSL" | `projects/cerebras-thesis/_log.md` |
+| "Noah's ARK", "music meeting", "curator", "dataset", "score-performance" | `projects/noahs-ark-music-eval/_log.md` |
+| "AI homogenization", "substrate-aware", "LLM social discovery", "insane idea" | `projects/moonshot-ideas/_log.md` |
+| "CSE446", "RL homework", "ML lecture" | `school/spring-2026/cse-446/_log.md` |
+| "CSE452", "distributed systems" | `school/spring-2026/cse-452/_log.md` |
+| "CSE579", "optimization" | `school/spring-2026/cse-579/_log.md` |
+| "PhD", "advisor", "research identity" | `research/phd-planning/_log.md` |
+| "Anthropic fellowship", "OpenAI residency", "Google Student Researcher" | `career/fellowships-residencies/_log.md` |
+| "Awaaz", "rehearsal", "performance" | `music/awaaz/_log.md` |
+| ARK talk / guest speaker | `projects/noahs-ark-music-eval/_log.md` |
 
 ---
 
 ## Step 6 — Preview plan
 
-Before writing anything, show the user a full preview:
+Before writing anything, show:
 
 ```
 === DAILY CAPTURE PREVIEW — YYYY-MM-DD ===
@@ -173,111 +241,127 @@ Before writing anything, show the user a full preview:
 SOURCES PULLED:
   ✓ Google Calendar: [N] events
   ✓ Gmail sent: [N] emails
-  ✓ Gmail received (relevant): [N] emails
-  ✓ Claude chat history: [N] relevant chats
-  [✓/–] Manual input: [provided / skipped]
+  ✓/– Claude chat history: [N relevant chats / tool unavailable]
+  ✓/– Manual input: [provided / skipped]
 
-DAILY LOG → DateBased/[Month YYYY]/YYYY-MM-DD.md
-  [full draft of what will be written]
+DAILY LOG → daily/YYYY/MM-month/YYYY-MM-DD.md
+  [full draft]
 
-SUBJECT FILE UPDATES:
-  → SubjectBased/[LeafFolder]/[leafolder].md
-     [bullet points that will be appended]
-  → SubjectBased/[Category]/[Subcategory]/[LeafFolder]/[leaffolder].md
-     [bullet points that will be appended]
-  [etc.]
+TOPIC FILE UPDATES:
+  → projects/[topic]/_log.md
+     [bullets that will be appended]
+  → school/[term]/[course]/_log.md
+     [bullets that will be appended]
 
-UNROUTED (stays in daily log only):
-  - [item] — no matching leaf folder found
+UNROUTED (daily log only):
+  - [item] — reason
 
 INDEX → _index.md
-  [list of files that will be updated]
+  [what changes]
 
-Proceed? [Y to confirm, or describe any changes]
+Proceed? [Y to confirm, or describe changes]
 ```
 
-Wait for user confirmation before writing anything. If the user asks for changes, adjust and show the preview again.
+Wait for confirmation before writing anything.
 
 ---
 
 ## Step 7 — Write files
 
-After confirmation, write in this order:
-
 ### Daily log format
-
-Each entry in the daily log gets a timestamp so you can see what time of day things happened. Use `HH:MM` 24-hour format.
 
 ```markdown
 # YYYY-MM-DD
 
 ## Events
-- HH:MM – HH:MM | [Event title] | [Attendees if any]
+- HH:MM – HH:MM | [Event title] | [Calendar] | [Attendees if any]
 
-## Emails
-- HH:MM | ↑ [Subject] → [Recipient]
-- HH:MM | ↓ [Subject] ← [Sender]
+## Emails Sent
+- HH:MM | [Subject] → [Recipient(s)]
 
-## Claude Chats
-- HH:MM | [Topic of what was worked on]
+## Chats / Work Sessions
+- HH:MM | [Topic worked on]
 
 ## Notes
-[HH:MM] [Synthesized bullet or narrative from manual input — factual content]
-[HH:MM] [Another item]
+- [HH:MM] [Factual note]
+
+## Routed Updates
+- `projects/example/_log.md` — [short summary]
+- `school/spring-2026/cse-446/_log.md` — [short summary]
+
+## Carryover
+- [ ] [Unfinished task or open question]
 
 ## Personal
-[HH:MM] [Q5 content, personal thoughts — this section only ever appears in this file]
+- [Personal reflections, mood, thoughts — stays here only]
 ```
 
-If the exact time isn't available from a source (e.g. voice memo), omit the timestamp for that item rather than guessing.
-
-If the skill is run a second time in the same day (appending), add:
+If appending (file already exists), add:
 
 ```markdown
 ---
 ### Update — HH:MM
 
-[new timestamped content block]
+[new content block]
 ```
 
-### Subject file format (append only)
-
-No timestamps here — subject files are clean reference logs, not timelines. Just the date header and factual bullets.
+### Topic file format (`_log.md`, append only)
 
 ```markdown
 ### YYYY-MM-DD
-- [factual bullet extracted from today's activity]
-- [another bullet]
+
+- [Factual update]
+- [Decision, thing learned, meeting outcome, or task completed]
 ```
 
-Never include personal/emotional content in subject files.
+No timestamps. No personal content. No emotional content.
 
 ### Index format
 
 Rewrite `_index.md` completely each run:
 
 ```markdown
-# DailyLog Index
+# Knowledge Base Index
 _Last updated: YYYY-MM-DD_
 
-## DateBased
-| File | Created |
-|------|---------|
-| [YYYY-MM-DD](DateBased/Month YYYY/YYYY-MM-DD.md) | YYYY-MM-DD |
-[... most recent 30 entries ...]
+## Recent Daily Logs
 
-## SubjectBased
-| Subject | File | Last Updated |
-|---------|------|-------------|
-| [LeafFolder] | [leaffolder.md](SubjectBased/[path]/[leaffolder].md) | YYYY-MM-DD |
-[... all leaf subject files that exist ...]
+| Date | File |
+|------|------|
+| YYYY-MM-DD | [path](path) |
+
+## Active Projects
+
+| Project | Log |
+|---------|-----|
+| [name] | [_log.md](path) |
+
+## School
+
+| Course | Log |
+|--------|-----|
+| [name] | [_log.md](path) |
+
+## Research / Career / Music / Personal
+
+| Area | Log |
+|------|-----|
+| [name] | [_log.md](path) |
 ```
 
 ---
 
-## Step 8 — Git commit
+## Step 8 — Optional sync
 
-After all files are written, run:
+After writing files, print the list of files changed.
+
+If `--sync` is passed and a git repository exists:
+
+```bash
+git status --short
+```
+
+Then ask the user before making any version-control changes, unless `--auto --sync` was explicitly passed. If `--auto --sync`, run:
 
 ```bash
 git add -A
@@ -285,30 +369,21 @@ git commit -m "daily capture: YYYY-MM-DD"
 git push
 ```
 
-If the push fails (e.g. no remote set up yet), print a warning but do not fail the skill — the local write still succeeded.
-
 ---
 
-## Auto-run mode
+## Auto-run mode (`--auto`)
 
-When invoked with `--auto` flag (from cron):
-- Skip the optional manual input step entirely
-- Skip the preview/confirmation step — write immediately
-- Use only automatic sources (Calendar, Gmail, Claude chats)
-- Still check for existing file first and exit if found
-- Still git commit at the end
+- Skip manual input step.
+- Skip preview/confirmation — write immediately.
+- Use only automatic sources.
+- Check for existing file first and exit if found.
+- Run sync only if `--sync` also passed.
 
 ---
 
 ## Error handling
 
-- If a Google Calendar or Gmail MCP call fails → note it in the daily log under the relevant section as "⚠ Could not pull [source]" and continue with what's available
-- If git push fails → warn but do not block
-- If a subject folder file doesn't exist yet → create it with a simple header before appending:
-
-```markdown
-# [Folder Name]
-_Notes routed here by daily-capture skill_
-
----
-```
+- Calendar or Gmail MCP fails → note as "⚠ Could not pull [source]" in daily log and continue.
+- Git push fails → warn but do not block.
+- `_log.md` does not exist → create with standard header before appending.
+- Month folder missing → create it.
